@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <!-- Keep Spring Boot's default console output -->
+    <include resource="org/springframework/boot/logging/logback/base.xml"/>
+
+    <!-- Forward log events into the OTel SDK (exported via OTLP) -->
+    <appender name="OpenTelemetry"
+              class="io.opentelemetry.instrumentation.logback.appender.v1_0.OpenTelemetryAppender"/>
+
+    <root level="INFO">
+        <appender-ref ref="OpenTelemetry"/>
+    </root>
+</configuration>
