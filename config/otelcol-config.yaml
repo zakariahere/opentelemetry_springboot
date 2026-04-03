@@ -32,7 +32,7 @@ exporters:
 
   # Debug: one line per batch to stdout (useful during bring-up)
   debug:
-    verbosity: basic
+    verbosity: detailed
 
 extensions:
   health_check:
