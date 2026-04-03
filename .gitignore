@@ -34,3 +34,6 @@ build/
 
 ### Claude code ####
 .claude
+
+### OpenTelemetry ###
+opentelemetry-javaagent.jar

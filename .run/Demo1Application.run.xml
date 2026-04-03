@@ -1,0 +1,11 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Demo1Application" type="SpringBootApplicationConfigurationType" factoryName="Spring Boot" nameIsGenerated="true">
+    <option name="FRAME_DEACTIVATION_UPDATE_POLICY" value="UpdateClassesAndResources" />
+    <module name="demo1" />
+    <option name="SPRING_BOOT_MAIN_CLASS" value="com.example.demo.Demo1Application" />
+    <option name="VM_PARAMETERS" value="-javaagent:$PROJECT_DIR$/opentelemetry-javaagent.jar -Dotel.service.name=demo1 -Dotel.exporter.otlp.endpoint=http://localhost:4318 -Dotel.logs.exporter=otlp" />
+    <method v="2">
+      <option name="Make" enabled="true" />
+    </method>
+  </configuration>
+</component>

@@ -1,15 +1,21 @@
-# Spring Boot 4 × OpenTelemetry — LGTM Stack Showcase
+# Spring Boot 4 × OpenTelemetry Java Agent — LGTM Stack Showcase
 
-A minimal but complete observability demo: a **Spring Boot 4** application that emits **traces**, **metrics**, and **logs** via the OTLP protocol to an **OpenTelemetry Collector**, which fans them out to the full **Grafana LGTM stack** (Loki · Grafana · Tempo · Mimir).
+A zero-code-change observability demo: a **Spring Boot 4** application instrumented entirely via the **OpenTelemetry Java Agent** (no SDK dependencies, no code modifications), emitting **traces**, **metrics**, and **logs** via OTLP to an **OpenTelemetry Collector**, which fans them out to the full **Grafana LGTM stack** (Loki · Grafana · Tempo · Mimir).
 
 ```
-Spring Boot App  ──OTLP/HTTP──▶  OTel Collector
-                                   ├──▶ Tempo   (traces)
-                                   ├──▶ Mimir   (metrics)
-                                   └──▶ Loki    (logs)
-                                         ▲
-                                      Grafana
+Spring Boot App
+  + OTel Java Agent (attached at JVM startup)
+        │  OTLP/HTTP → localhost:4318
+        ▼
+   OTel Collector
+     ├──▶ Tempo   (traces)
+     ├──▶ Mimir   (metrics)
+     └──▶ Loki    (logs)
+               ▲
+            Grafana
 ```
+
+> **Branch context:** This is the `feat/auto-instrumentation` branch. The `main` branch uses the Spring Boot OTel SDK bridge approach (explicit dependencies + `logback-spring.xml`). See the comparison section below for trade-offs.
 
 ---
 
@@ -18,6 +24,7 @@ Spring Boot App  ──OTLP/HTTP──▶  OTel Collector
 | Component | Role | Port |
 |-----------|------|------|
 | Spring Boot 4.0.5 | Demo application | 8080 |
+| OTel Java Agent 2.26.1 | Bytecode instrumentation | — |
 | OTel Collector contrib 0.123.0 | Signal router | 4317 (gRPC) · 4318 (HTTP) |
 | Grafana Tempo 2.7.2 | Trace backend | 3200 |
 | Grafana Mimir 2.15.0 | Metrics backend | 9009 |
@@ -33,34 +40,85 @@ Spring Boot App  ──OTLP/HTTP──▶  OTel Collector
 
 ---
 
-## Running
+## Setup
+
+### 1. Download the Java Agent
 
 ```bash
-# Clone and enter the project
-git clone <repo-url>
-cd demo1
-
-# Start the app — Spring Boot auto-starts the Docker Compose stack first
-./mvnw.cmd spring-boot:run        # Windows
-./mvnw spring-boot:run            # macOS / Linux
+curl -L -o opentelemetry-javaagent.jar \
+  https://github.com/open-telemetry/opentelemetry-java-instrumentation/releases/latest/download/opentelemetry-javaagent.jar
 ```
 
-Spring Boot's docker-compose integration starts all five containers (Collector, Tempo, Mimir, Loki, Grafana), waits for them to be healthy, then starts the application.
+The jar is gitignored — each developer downloads it once.
+
+### 2. Start the infrastructure
+
+```bash
+docker compose up -d
+```
+
+This starts the OTel Collector, Tempo, Mimir, Loki, and Grafana. Alternatively, just run the app — Spring Boot's docker-compose integration starts the stack automatically.
+
+### 3. Run the app with the agent
+
+#### IntelliJ IDEA
+
+`Run` → `Edit Configurations` → `Demo1Application` → **VM options**:
+
+```
+-javaagent:C:/path/to/demo1/opentelemetry-javaagent.jar
+-Dotel.service.name=demo1
+-Dotel.exporter.otlp.endpoint=http://localhost:4318
+-Dotel.logs.exporter=otlp
+```
+
+> The run configuration is also committed at `.run/Demo1Application.run.xml` — IntelliJ picks it up automatically.
+
+#### Command line
+
+```bash
+java \
+  -javaagent:./opentelemetry-javaagent.jar \
+  -Dotel.service.name=demo1 \
+  -Dotel.exporter.otlp.endpoint=http://localhost:4318 \
+  -Dotel.logs.exporter=otlp \
+  -jar target/demo1-0.0.1-SNAPSHOT.jar
+```
+
+---
+
+## Agent Configuration
+
+The agent is configured entirely via JVM system properties — no `application.properties` changes needed.
+
+| Property | Value | Description |
+|----------|-------|-------------|
+| `otel.service.name` | `demo1` | Service name shown in all signals |
+| `otel.exporter.otlp.endpoint` | `http://localhost:4318` | Base OTLP/HTTP endpoint (agent appends `/v1/traces`, `/v1/metrics`, `/v1/logs`) |
+| `otel.logs.exporter` | `otlp` | Enables log export (disabled by default) |
+
+> **Protocol note:** Agent 2.x defaults to `http/protobuf` — use port **4318**. Port `4317` is gRPC only and will cause a protocol error.
+
+### What the agent instruments automatically
+
+Out of the box, with zero code changes:
+
+- **Traces** — every incoming HTTP request, outgoing HTTP call, JDBC query, scheduled task, and more (~50 frameworks supported)
+- **Metrics** — JVM internals (heap, GC, threads, classes), HTTP server request durations, connection pool stats
+- **Logs** — Logback log records bridged into the OTel SDK via the agent's built-in log appender
 
 ---
 
 ## Demo Endpoints
 
-Hit these to generate all three signal types:
-
 ```bash
-# Fast path — trace + INFO log + counter increment
+# Fast path — auto-instrumented HTTP span + INFO log
 curl http://localhost:8080/hello
 
-# Slow path — 1500ms sleep, gauge tracks active requests
+# Slow path — 1500ms span duration visible in Tempo flame graphs
 curl http://localhost:8080/slow
 
-# Error path — ERROR log with stack trace, HTTP 500 response
+# Error path — span with error status + ERROR log with stack trace
 curl http://localhost:8080/error
 ```
 
@@ -68,41 +126,49 @@ curl http://localhost:8080/error
 
 ## Exploring in Grafana
 
-Open **http://localhost:3000** — anonymous admin access, no login needed.
+Open **http://localhost:3000** — anonymous admin, no login required.
 
 ### Traces (Tempo)
 `Explore` → **Tempo** → Search tab → Service Name: `demo1` → Run query
 
-- `/slow` spans show ~1500ms duration
-- `/error` spans carry an error status
-- Click any span to open the flame graph
+- `/slow` spans show ~1500ms duration in the flame graph
+- `/error` spans are marked with an error status
+- The agent automatically creates child spans for any outbound calls
 
 ### Metrics (Mimir)
 `Explore` → **Mimir** → try these queries:
 
 ```promql
-# Custom counters from DemoController
-demo_hello_requests_total
-demo_error_requests_total
-demo_slow_active
+# HTTP server request rate (auto-instrumented by agent)
+rate(http_server_request_duration_seconds_count{http_route="/hello"}[1m])
 
-# Spring MVC auto-instrumentation
-rate(http_server_requests_seconds_count[1m])
-histogram_quantile(0.95, rate(http_server_requests_seconds_bucket[5m]))
+# P95 latency across all endpoints
+histogram_quantile(0.95, rate(http_server_request_duration_seconds_bucket[5m]))
+
+# JVM heap usage (auto-collected by agent)
+jvm_memory_used_bytes{jvm_memory_type="heap"}
+
+# JVM GC pause time
+rate(jvm_gc_duration_seconds_sum[1m])
+
+# Active HTTP connections
+http_server_active_requests
 ```
 
 ### Logs (Loki)
 `Explore` → **Loki** → Label filter: `service_name = demo1`
 
+The agent bridges Logback output into OTel automatically — every `log.info(...)`, `log.error(...)` etc. is exported without any configuration in the app.
+
 ### Cross-signal correlation
-All three datasources are pre-wired:
+All three datasources are pre-wired for correlation:
 
 | From | To | How |
 |------|----|-----|
 | Tempo trace span | Loki logs | Click the **Loki** button on any span |
 | Tempo trace span | Mimir metrics | Click the **Mimir** button on any span |
-| Loki log line | Tempo trace | Click **View Trace in Tempo** on any log with a `traceId` |
-| Mimir metric | Tempo trace | Exemplars link histogram data points back to traces |
+| Loki log line | Tempo trace | Click **View Trace in Tempo** on any log line |
+| Mimir metric | Tempo trace | Exemplars on histogram metrics link back to traces |
 
 ---
 
@@ -110,7 +176,10 @@ All three datasources are pre-wired:
 
 ```
 demo1/
-├── compose.yaml                        # Full infrastructure stack
+├── compose.yaml                        # Full infrastructure stack (5 services)
+├── opentelemetry-javaagent.jar         # Downloaded locally, gitignored
+├── .run/
+│   └── Demo1Application.run.xml        # IntelliJ run config with agent VM options
 ├── config/
 │   ├── otelcol-config.yaml             # Collector: receive OTLP, route to backends
 │   ├── tempo-config.yaml               # Trace storage + RED metrics generator
@@ -122,80 +191,56 @@ demo1/
 │               └── datasources.yaml    # Auto-provisioned Tempo + Mimir + Loki
 └── src/main/
     ├── java/com/example/demo/
-    │   ├── Demo1Application.java       # @SpringBootApplication + OTel log bridge wiring
+    │   ├── Demo1Application.java       # Plain @SpringBootApplication, no OTel code
     │   └── DemoController.java         # /hello · /slow · /error endpoints
     └── resources/
-        ├── application.properties      # OTLP endpoints for all three signals
-        └── logback-spring.xml          # Adds OpenTelemetryAppender to Logback
+        └── application.properties      # Only spring.application.name, nothing OTel
 ```
+
+Notice what's **absent**: no OTel dependencies in `pom.xml`, no `logback-spring.xml`, no `OpenTelemetryAppender.install()` call, no `management.otlp.*` properties. The agent handles everything.
 
 ---
 
 ## How the Signals Are Exported
 
 ### Traces
-`spring-boot-starter-opentelemetry` includes `micrometer-tracing-bridge-otel`, which auto-instruments all incoming HTTP requests. Spans are exported via OTLP/HTTP to the Collector, which forwards them to Tempo via OTLP/gRPC.
+The agent instruments bytecode at JVM startup. Every `@GetMapping` handler becomes a root span automatically. The span lifecycle, attributes (`http.method`, `http.route`, `http.status_code`, etc.), and context propagation are all handled by the agent with no annotations required.
 
 ### Metrics
-Micrometer's OTLP registry pushes metrics every 30s via OTLP/HTTP to the Collector, which forwards them to Mimir's native OTLP ingestion endpoint (`/otlp/v1/metrics`).
+The agent registers an OTel metrics SDK and collects:
+- **JVM metrics** — memory pools, GC activity, thread counts, class loading
+- **HTTP server metrics** — request duration histograms, active request gauges
+- **HTTP client metrics** — if the app makes outbound calls
 
-Tempo's `metrics_generator` additionally derives **RED metrics** (Rate / Error / Duration) and **service graph** edges from trace data — these are also queryable in Mimir/Grafana.
+All metrics are pushed via OTLP/HTTP to the Collector every 60s (default), which forwards them to Mimir. Tempo's `metrics_generator` also derives **RED metrics** and **service graph** edges from trace data.
 
 ### Logs
-The Logback→OTel bridge requires two pieces working together:
-
-1. **`logback-spring.xml`** — adds `OpenTelemetryAppender` to Logback's appender chain
-2. **`Demo1Application`** — calls `OpenTelemetryAppender.install(openTelemetry)` once the Spring `ApplicationContext` is ready, wiring the appender to the configured OTel SDK instance
-
-This two-step approach is necessary because Logback initializes before the Spring context, so the appender exists but has no SDK reference until explicitly installed. Log records are exported via OTLP/HTTP to the Collector, which forwards them to Loki's native OTLP endpoint (`/otlp/v1/logs`).
+The agent installs its own Logback appender at startup (no `logback-spring.xml` needed). Every log record is captured, enriched with the active `traceId` and `spanId` from the current span context, and exported via OTLP/HTTP to the Collector, which forwards them to Loki.
 
 > **Key Loki config**: `allow_structured_metadata: true` is required for OTLP log ingestion — OTel resource and scope attributes arrive as structured metadata, not flat stream labels.
 
 ---
 
-## Key Dependencies
+## Approach Comparison
 
-```xml
-<!-- Auto-instruments HTTP, configures OTel SDK, exports traces+metrics via OTLP -->
-<dependency>
-    <groupId>org.springframework.boot</groupId>
-    <artifactId>spring-boot-starter-opentelemetry</artifactId>
-</dependency>
+This branch uses the Java Agent. The `main` branch uses the Spring Boot SDK bridge. Here's when to choose each:
 
-<!-- Logback → OTel SDK bridge (not in Spring Boot BOM, version must be explicit) -->
-<dependency>
-    <groupId>io.opentelemetry.instrumentation</groupId>
-    <artifactId>opentelemetry-logback-appender-1.0</artifactId>
-    <version>2.16.0-alpha</version>
-</dependency>
-```
-
----
-
-## Configuration Reference
-
-### `application.properties`
-
-```properties
-# Traces
-management.opentelemetry.tracing.export.otlp.endpoint=http://localhost:4318/v1/traces
-management.tracing.sampling.probability=1.0   # 100% sampling — demo only
-
-# Metrics
-management.otlp.metrics.export.url=http://localhost:4318/v1/metrics
-management.otlp.metrics.export.step=30s
-
-# Logs
-management.opentelemetry.logging.export.otlp.endpoint=http://localhost:4318/v1/logs
-```
-
-All three signals target the Collector's OTLP/HTTP port on `localhost:4318`. The Collector then routes them to the appropriate backend using Docker's internal DNS (`tempo`, `mimir`, `loki`).
+| | Java Agent (this branch) | SDK Bridge (main branch) |
+|---|---|---|
+| `pom.xml` changes | None | 2 dependencies |
+| Code changes | None | `logback-spring.xml` + `install()` call |
+| Custom spans | Needs `@WithSpan` or API import | Natural via `MeterRegistry`, OTel API |
+| Custom metrics | Via OTel API only | Full Micrometer integration |
+| Startup time | Slower (bytecode weaving) | Faster |
+| Library coverage | ~50 frameworks auto-detected | Explicit per framework |
+| Configuration | JVM flags / env vars | Spring `application.properties` |
+| Best for | Legacy apps, drop-in observability | Greenfield, fine-grained control |
 
 ---
 
 ## Notes
 
 - All backend storage is under `/tmp` inside containers — **ephemeral by design**. Data is lost on container restart.
-- `sampling.probability=1.0` captures every request. Reduce this in any non-demo environment.
 - Grafana is configured with anonymous Admin access — remove `GF_AUTH_ANONYMOUS_*` from `compose.yaml` before any non-local deployment.
 - The `otelcol-contrib` image is distroless (no shell), so Docker healthchecks using `wget`/`curl` will not work against it.
+- The agent jar (~24MB) is excluded from git via `.gitignore`. The download `curl` command above fetches the latest stable release.
